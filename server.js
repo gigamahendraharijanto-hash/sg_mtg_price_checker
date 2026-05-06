@@ -854,10 +854,10 @@ function buildDeliveredPlan(cardResults) {
 }
 
 async function serveStatic(req, res, url) {
-  const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname;
-  const filePath = path.normalize(path.join(PUBLIC_DIR, requestedPath));
+  const requestedPath = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.replace(/^\/+/, ""));
+  const filePath = path.resolve(PUBLIC_DIR, requestedPath);
 
-  if (!filePath.startsWith(PUBLIC_DIR)) {
+  if (!filePath.startsWith(path.resolve(PUBLIC_DIR) + path.sep)) {
     res.writeHead(403);
     res.end("Forbidden");
     return;
@@ -880,6 +880,21 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   try {
+    if (url.pathname === "/health") {
+      let publicFiles = [];
+      try {
+        publicFiles = await fs.readdir(PUBLIC_DIR);
+      } catch {
+        publicFiles = [];
+      }
+      sendJson(res, 200, {
+        ok: true,
+        publicDir: PUBLIC_DIR,
+        publicFiles,
+      });
+      return;
+    }
+
     if (url.pathname === "/api/search") {
       await handleSearch(req, res, url);
       return;
