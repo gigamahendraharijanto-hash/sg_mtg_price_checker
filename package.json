@@ -1,0 +1,13 @@
+{
+  "name": "sg-mtg-price-finder",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local MTG card price finder for Singapore stores.",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
