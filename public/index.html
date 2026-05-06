@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Cheap Deck Builder</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <p class="eyebrow">Singapore MTG singles</p>
+          <h1>Cheap Deck Builder</h1>
+        </div>
+        <div class="stores" aria-label="Enabled stores">
+          <span>Hideout</span>
+          <span>Games Haven</span>
+          <span>MTG Asia</span>
+          <span>Grey Ogre</span>
+          <span>One MTG</span>
+        </div>
+      </section>
+
+      <form class="search-panel" id="search-form">
+        <label for="card-input" id="input-label">Decklist</label>
+        <textarea id="card-input" name="q" autocomplete="off" spellcheck="false">1 Sol Ring
+1 Counterspell</textarea>
+        <div class="actions">
+          <button class="cancel-button" id="cancel-search" type="button" hidden>Cancel Search</button>
+          <button type="submit">Search Cheapest</button>
+        </div>
+      </form>
+
+      <section class="status" id="status">Ready.</section>
+      <section class="progress-panel" id="progress-panel" hidden>
+        <div class="progress-header">
+          <strong id="progress-title">Checking stores</strong>
+          <span id="progress-count">0 / 0</span>
+        </div>
+        <div class="progress-track" aria-hidden="true">
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <div class="progress-list" id="progress-list"></div>
+      </section>
+      <section class="summary" id="summary" hidden></section>
+      <section class="checkout-plan" id="checkout-plan" hidden></section>
+      <section class="results" id="results"></section>
+      <a class="floating-cart" href="#checkout-plan">Cart</a>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
