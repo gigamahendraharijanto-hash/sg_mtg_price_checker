@@ -73,6 +73,86 @@ const contentTypes = {
 };
 
 const scryfallAliasCache = new Map();
+const responseCache = new Map();
+const requestQueues = new Map();
+const HOSTED_MODE = Boolean(process.env.RENDER || process.env.NODE_ENV === "production");
+const REQUEST_CACHE_TTL_MS = 10 * 60 * 1000;
+const REQUEST_GAP_MS = HOSTED_MODE ? 1200 : 250;
+const RETRY_429_MS = HOSTED_MODE ? 8000 : 2500;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function cacheKeyFor(url, options = {}) {
+  return `${String(options.method || "GET").toUpperCase()} ${String(url)}`;
+}
+
+function cachedResponse(url, options) {
+  const key = cacheKeyFor(url, options);
+  const cached = responseCache.get(key);
+  if (!cached || cached.expiresAt <= Date.now()) {
+    responseCache.delete(key);
+    return null;
+  }
+  return new Response(cached.body, {
+    status: cached.status,
+    statusText: cached.statusText,
+    headers: cached.headers,
+  });
+}
+
+async function rememberResponse(url, options, response) {
+  if (!response.ok || String(options.method || "GET").toUpperCase() !== "GET") return;
+  const key = cacheKeyFor(url, options);
+  const headers = {};
+  response.headers.forEach((value, name) => {
+    headers[name] = value;
+  });
+  responseCache.set(key, {
+    body: await response.clone().text(),
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+    expiresAt: Date.now() + REQUEST_CACHE_TTL_MS,
+  });
+}
+
+async function politeFetch(url, options = {}) {
+  const target = new URL(String(url));
+  const cached = cachedResponse(target, options);
+  if (cached) return cached;
+
+  const queueKey = target.hostname;
+  const previous = requestQueues.get(queueKey) || Promise.resolve();
+  let release;
+  const current = previous.catch(() => {}).then(() => new Promise((resolve) => {
+    release = resolve;
+  }));
+  requestQueues.set(queueKey, current);
+  await previous.catch(() => {});
+
+  try {
+    await delay(REQUEST_GAP_MS);
+    const headers = {
+      "accept": "*/*",
+      "user-agent": "Mozilla/5.0 (compatible; SGMTGPriceFinder/0.1; personal deck price comparison)",
+      ...(options.headers || {}),
+    };
+    let response = await fetch(target, { ...options, headers });
+
+    if (response.status === 429) {
+      const retryAfter = Number(response.headers.get("retry-after") || 0);
+      await delay(retryAfter ? retryAfter * 1000 : RETRY_429_MS);
+      response = await fetch(target, { ...options, headers });
+    }
+
+    await rememberResponse(target, options, response);
+    return response;
+  } finally {
+    release();
+  }
+}
 
 function sendJson(res, status, body) {
   res.writeHead(status, {
@@ -247,7 +327,7 @@ function embeddedInventoryFromHtml(html, variantId) {
 async function fetchEmbeddedShopifyStock(store, handle, variantId) {
   if (!handle || !variantId) return null;
   try {
-    const response = await fetch(new URL(`/products/${handle}`, store.baseUrl), {
+    const response = await politeFetch(new URL(`/products/${handle}`, store.baseUrl), {
       headers: { "user-agent": "SG MTG Price Finder/0.1 (+local personal price comparison)" },
     });
     if (!response.ok) return null;
@@ -282,7 +362,7 @@ function deckTextFromMoxfieldDeck(deck) {
 }
 
 async function fetchMoxfieldDeck(deckId) {
-  const response = await fetch(`https://api2.moxfield.com/v2/decks/all/${deckId}`, {
+  const response = await politeFetch(`https://api2.moxfield.com/v2/decks/all/${deckId}`, {
     headers: {
       "accept": "application/json",
       "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0 SGMTGPriceFinder/0.1",
@@ -335,7 +415,7 @@ async function normalizeShopifyProduct(product, store, query) {
   let cheapestVariant = null;
   try {
     const productUrl = new URL(`/products/${product.handle}.js`, store.baseUrl);
-    const response = await fetch(productUrl, { headers: { "accept": "application/json" } });
+    const response = await politeFetch(productUrl, { headers: { "accept": "application/json" } });
     if (response.ok) {
       const detail = await response.json();
       cheapestVariant = (detail.variants || [])
@@ -387,7 +467,7 @@ async function searchShopifyStore(store, query, limit) {
   url.searchParams.set("resources[type]", "product");
   url.searchParams.set("resources[limit]", String(limit));
 
-  const response = await fetch(url, {
+  const response = await politeFetch(url, {
     headers: {
       "accept": "application/json",
       "user-agent": "SG MTG Price Finder/0.1 (+local personal price comparison)",
@@ -400,7 +480,11 @@ async function searchShopifyStore(store, query, limit) {
 
   const data = await response.json();
   const products = data?.resources?.results?.products || [];
-  const normalized = await Promise.all(products.map((product) => normalizeShopifyProduct(product, store, query)));
+  const normalized = [];
+  for (const product of products) {
+    const item = await normalizeShopifyProduct(product, store, query);
+    if (item) normalized.push(item);
+  }
   return normalized.filter(Boolean);
 }
 
@@ -412,7 +496,7 @@ async function scryfallAliasesForCard(name) {
   try {
     const namedUrl = new URL("https://api.scryfall.com/cards/named");
     namedUrl.searchParams.set("exact", name);
-    const namedResponse = await fetch(namedUrl, {
+    const namedResponse = await politeFetch(namedUrl, {
       headers: { "accept": "application/json", "user-agent": "SGMTGPriceFinder/0.1 (local deck budget builder)" },
     });
     if (!namedResponse.ok) throw new Error("Scryfall named lookup failed");
@@ -424,7 +508,7 @@ async function scryfallAliasesForCard(name) {
     searchUrl.searchParams.set("q", `oracleid:${named.oracle_id}`);
     searchUrl.searchParams.set("unique", "prints");
     for (let page = 0; page < 4 && searchUrl; page += 1) {
-      const response = await fetch(searchUrl, {
+      const response = await politeFetch(searchUrl, {
         headers: { "accept": "application/json", "user-agent": "SGMTGPriceFinder/0.1 (local deck budget builder)" },
       });
       if (!response.ok) break;
@@ -456,7 +540,7 @@ async function searchStoreWithAliases(store, cardName, aliases, limit) {
 async function searchMoxStore(store, query) {
   const url = new URL("/api/products", store.baseUrl);
   url.searchParams.set("search", query);
-  const response = await fetch(url, { headers: { "accept": "application/json" } });
+  const response = await politeFetch(url, { headers: { "accept": "application/json" } });
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   const products = await response.json();
 
@@ -507,7 +591,7 @@ function attr(fragment, name) {
 async function searchDuellersStore(store, query) {
   const url = new URL("/products/search", store.baseUrl);
   url.searchParams.set("search_text", query);
-  const response = await fetch(url, { headers: { "accept": "text/html" } });
+  const response = await politeFetch(url, { headers: { "accept": "text/html" } });
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   const html = await response.text();
   const rows = html.match(/<tr>[\s\S]*?<\/tr>/gi) || [];
@@ -563,13 +647,13 @@ async function enrichStockForListing(item) {
 
 async function enrichStockForListings(items) {
   const seen = new Set();
-  await Promise.all(items.map(async (item) => {
-    if (!item || item.missing) return;
+  for (const item of items) {
+    if (!item || item.missing) continue;
     const key = `${item.storeId}:${item.variantId}`;
-    if (seen.has(key)) return;
+    if (seen.has(key)) continue;
     seen.add(key);
     await enrichStockForListing(item);
-  }));
+  }
 }
 
 function cheapestByStore(results) {
@@ -622,16 +706,14 @@ async function handleSearch(req, res, url) {
 
   for (const card of cards) {
     const aliases = await scryfallAliasesForCard(card.name);
-    const settled = await Promise.allSettled(stores.map((store) => searchStoreWithAliases(store, card.name, aliases, limit)));
     const results = [];
-    settled.forEach((entry, index) => {
-      const store = stores[index];
-      if (entry.status === "fulfilled") {
-        results.push(...entry.value);
-      } else {
-        errors.push({ card: card.name, store: store.name, message: entry.reason?.message || "Search failed" });
+    for (const store of stores) {
+      try {
+        results.push(...await searchStoreWithAliases(store, card.name, aliases, limit));
+      } catch (error) {
+        errors.push({ card: card.name, store: store.name, message: error?.message || "Search failed" });
       }
-    });
+    }
     results.sort((a, b) => a.priceMin - b.priceMin || a.store.localeCompare(b.store) || a.title.localeCompare(b.title));
     const storesForCard = cheapestByStore(results);
     await enrichStockForListings(storesForCard.filter((item) => !item.missing));
